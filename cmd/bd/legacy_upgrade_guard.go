@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/utils"
+	"golang.org/x/mod/semver"
 )
 
 // guardLegacyUpgradeWorkspace rejects the reviewed pre-Dolt and legacy-Dolt
@@ -43,8 +44,8 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 	if embeddeddolt.HasRepository(beadsDir) && !serverMode {
 		return nil
 	}
-	version, ok := legacyUpgradeVersionWitness(beadsDir)
-	if serverMode && ok && legacyServerVersion(version) {
+	version, present := legacyUpgradeVersionWitness(beadsDir)
+	if serverMode && present && legacyServerVersion(version) {
 		return legacyUpgradeRefusal(fmt.Sprintf("legacy Dolt server workspace from bd %s", version))
 	}
 	hasLocalDoltRoot := hasLegacyDoltRoot(beadsDir)
@@ -52,18 +53,34 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 		return nil
 	}
 	if serverMode {
-		if currentVersionWitness(version) {
+		switch classifyVersionWitness(version) {
+		case witnessEraCurrent:
 			return nil
+		case witnessEraUnknown:
+			// A witness that is present but unreadable — including one left
+			// blank or whitespace-only by an interrupted or disk-full
+			// best-effort write — is not evidence of a legacy workspace: every
+			// pre-1.0 bd wrote a plain X.Y.Z through the same writer, so no
+			// legacy release could have produced a witness this parse rejects.
+			// Report the ambiguity and open the workspace so the admitted
+			// command can self-heal the witness, instead of refusing every
+			// command over an advisory, gitignored file. A genuinely absent
+			// witness is not present and still refuses below, preserving the
+			// pre-1.0 guard invariant.
+			if present {
+				warnUnreadableVersionWitness(beadsDir, version)
+				return nil
+			}
 		}
 		return legacyUpgradeRefusal("legacy Dolt server workspace")
 	}
 	if cfg == nil || cfg.DoltMode == "" ||
 		strings.EqualFold(cfg.DoltMode, configfile.DoltModeEmbedded) {
-		if doltserver.IsSharedServerMode() && !(ok && legacyServerVersion(version)) {
+		if doltserver.IsSharedServerMode() && !(present && legacyServerVersion(version)) {
 			return nil
 		}
 		reason := "legacy Dolt workspace"
-		if _, validVersion := legacyVersionMinor(version); ok && validVersion {
+		if _, validVersion := legacyVersionMinor(version); present && validVersion {
 			reason = fmt.Sprintf("legacy Dolt workspace from bd %s", version)
 		}
 		return legacyUpgradeRefusal(reason)
@@ -233,18 +250,26 @@ func isRegularFile(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// legacyUpgradeVersionWitness reads the advisory local version witness beneath
+// beadsDir. The returned bool reports whether a witness file is present as a
+// bounded regular file, independent of whether its trimmed contents name a
+// version. A present but blank or whitespace-only witness — the shape an
+// interrupted or disk-full best-effort writeLocalVersion leaves behind — is
+// returned as ("", true) so guardLegacyUpgradeWorkspace can tell it apart from
+// a genuinely absent witness, which is ("", false). Only a present witness is
+// ever admitted as an unknown-era workspace; a missing, non-regular, or
+// oversized witness stays absent so the pre-1.0 refusal cannot relax.
 func legacyUpgradeVersionWitness(beadsDir string) (string, bool) {
 	path := filepath.Join(beadsDir, localVersionFile)
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 64 {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 64 {
 		return "", false
 	}
 	data, err := os.ReadFile(path) // #nosec G304 -- bounded file beneath selected workspace
 	if err != nil || int64(len(data)) != info.Size() {
 		return "", false
 	}
-	version := strings.TrimSpace(string(data))
-	return version, version != ""
+	return strings.TrimSpace(string(data)), true
 }
 
 func legacyServerVersion(version string) bool {
@@ -252,68 +277,83 @@ func legacyServerVersion(version string) bool {
 	return ok && minor >= 55 && minor <= 62
 }
 
-// currentVersionWitness identifies a version marker only a post-1.0 binary
-// could have written: an x.y.z with major >= 1 (pre-release and build-metadata
-// suffixes tolerated, see versionCore), or a Homebrew --HEAD stamp. A local
-// Dolt root in server mode is ambiguous without it, so that shape must be
-// refused rather than opened as a historical schema.
-func currentVersionWitness(version string) bool {
+// witnessEra is the release era a local version witness places a workspace in.
+type witnessEra int
+
+const (
+	// witnessEraUnknown means the witness is missing or cannot be read as a
+	// version. It is an absence of evidence, not evidence of a legacy layout.
+	witnessEraUnknown witnessEra = iota
+	// witnessEraLegacy means the witness names a pre-1.0 bd.
+	witnessEraLegacy
+	// witnessEraCurrent means the witness names bd 1.0 or later.
+	witnessEraCurrent
+)
+
+// classifyVersionWitness places a local version witness in a release era.
+//
+// The witness is whatever string the bd that last touched the workspace held
+// in main.Version, which release tooling injects verbatim: a plain release
+// ("1.1.0"), a release candidate ("v1.2.0-rc.1"), a build carrying metadata,
+// or a Go pseudo-version ("v1.1.1-0.20260805093327-bf97b73749ac"). All of
+// those are valid semantic versions, so the era comes from a semver parse
+// rather than from counting dots.
+func classifyVersionWitness(version string) witnessEra {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return witnessEraUnknown
+	}
 	if isBrewHeadVersion(version) {
-		return true
+		return witnessEraCurrent
 	}
-	parts := strings.Split(versionCore(version), ".")
-	if len(parts) != 3 {
-		return false
+	if canonical := "v" + strings.TrimPrefix(version, "v"); semver.IsValid(canonical) {
+		if semver.Major(canonical) == "v0" {
+			return witnessEraLegacy
+		}
+		return witnessEraCurrent
 	}
-	major, err := strconv.Atoi(parts[0])
-	if err != nil || major < 1 {
-		return false
-	}
-	for _, part := range parts[1:] {
-		if _, err := strconv.Atoi(part); err != nil {
-			return false
+	// Strict semver rejects shapes a distributor could still stamp onto a
+	// legacy build, such as a zero-padded or four-component version. Classify
+	// those by their major component alone so the pre-1.0 guard never relaxes.
+	if major, _, _ := strings.Cut(strings.TrimPrefix(version, "v"), "."); major != "" {
+		if value, err := strconv.Atoi(major); err == nil && value == 0 {
+			return witnessEraLegacy
 		}
 	}
-	return true
+	return witnessEraUnknown
 }
 
-// versionCore reduces a version stamp to its bare x.y.z core: it drops the
-// optional leading "v" and any pre-release or build-metadata suffix. Every
-// classifier in this file shares it so that a suffixed stamp cannot land
-// outside both the current-era and legacy-era buckets, which on the
-// shared-server path would admit a legacy workspace.
-func versionCore(version string) string {
-	core := strings.TrimPrefix(version, "v")
-	if cut := strings.IndexAny(core, "-+"); cut >= 0 {
-		core = core[:cut]
-	}
-	return core
-}
-
-// isBrewHeadVersion reports whether a stamp is the version Homebrew writes
-// into --HEAD installs of the core beads formula; doctor.IsBrewHeadVersion is
-// the canonical definition. The guard may treat such a witness as current-era
-// because no legacy-era channel could produce the shape: the archived legacy
-// tap formula was GoReleaser-generated with no head spec at all (it only
-// unpacked a prebuilt tarball), the Makefile stamps main.Build and never
-// main.Version, and the release workflow passes an x.y.z to -X main.Version.
+// isBrewHeadVersion reports whether Homebrew could have written version for a
+// --HEAD install. The doctor package owns the canonical recognizer so version
+// tracking, diagnostics, and the upgrade guard cannot drift apart.
 func isBrewHeadVersion(version string) bool {
 	return doctor.IsBrewHeadVersion(version)
 }
 
+// legacyVersionMinor returns the minor component of a pre-1.0 version witness.
 func legacyVersionMinor(version string) (int, bool) {
-	parts := strings.Split(versionCore(version), ".")
-	if len(parts) != 3 || parts[0] != "0" {
+	version = strings.TrimSpace(version)
+	canonical := "v" + strings.TrimPrefix(version, "v")
+	if !semver.IsValid(canonical) || semver.Major(canonical) != "v0" {
 		return 0, false
 	}
-	minor, err := strconv.Atoi(parts[1])
+	minor, err := strconv.Atoi(strings.TrimPrefix(semver.MajorMinor(canonical), "v0."))
 	if err != nil {
 		return 0, false
 	}
-	if _, err := strconv.Atoi(parts[2]); err != nil {
-		return 0, false
-	}
 	return minor, true
+}
+
+// legacyUpgradeWarnWriter receives guard warnings; tests redirect it.
+var legacyUpgradeWarnWriter io.Writer = os.Stderr
+
+// warnUnreadableVersionWitness reports a workspace bd opened despite being
+// unable to read its version witness, so an operator can still see that the
+// era check was inconclusive.
+func warnUnreadableVersionWitness(beadsDir, version string) {
+	fmt.Fprintf(legacyUpgradeWarnWriter,
+		"Warning: unreadable version witness %q in %s; assuming a current workspace. Run 'bd doctor' to reset version tracking.\n",
+		version, filepath.Join(beadsDir, localVersionFile))
 }
 
 func legacyUpgradeRefusal(reason string) error {

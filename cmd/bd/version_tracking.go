@@ -98,6 +98,9 @@ func readLocalVersion(path string) string {
 }
 
 // writeLocalVersion writes the current version to the local version file.
+// The value is main.Version verbatim, which release tooling sets by ldflags and
+// may be a release candidate, a build carrying metadata, or a Go pseudo-version.
+// Readers must accept every shape this can write; see classifyVersionWitness.
 func writeLocalVersion(path, version string) error {
 	return os.WriteFile(path, []byte(version+"\n"), 0600)
 }
@@ -235,13 +238,11 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	// GH#2137: If upgrading from pre-0.56, the dolt database may have been
 	// created by the old embedded Dolt mode. Recover by reinitializing.
 	// CompareVersions scans each dot-part with %d and leaves unparsable parts
-	// at 0, so a non-semver stamp such as a Homebrew "HEAD-<sha>" would read as
+	// at 0, so a non-semver stamp such as Homebrew's "HEAD-<sha>" would look
 	// pre-0.56 and hand a current workspace to a recovery path that deletes
-	// .dolt. Only an actual semver predecessor may reach it — normalized via
-	// versionCore so a v-prefixed or suffixed pre-0.56 stamp, which the
-	// legacy guard's classifiers tolerate, keeps its recovery.
-	prevCore := versionCore(previousVersion)
-	if doctor.IsValidSemver(prevCore) && doctor.CompareVersions(prevCore, "0.56.0") < 0 {
+	// .dolt. Only a predecessor positively classified as pre-1.0 may reach it.
+	previousMinor, isLegacyVersion := legacyVersionMinor(previousVersion)
+	if isLegacyVersion && previousMinor < 56 {
 		recovered, recErr := doltserver.RecoverPreV56DoltDir(dbPath)
 		if recErr != nil {
 			debug.Logf("auto-migrate: pre-v56 recovery failed: %v", recErr)

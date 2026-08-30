@@ -159,6 +159,7 @@ func proxiedGetComments(ctx context.Context, uw uow.UnitOfWork, id string, isWis
 func reportIssueLookupFailure(verb, id string, err error) {
 	if errors.Is(err, storage.ErrNotFound) {
 		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+		fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
 		return
 	}
 	fmt.Fprintf(os.Stderr, "Error %s %s: %v\n", verb, id, err)
@@ -468,7 +469,8 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 		if len(allDetails) > 0 {
 			_ = outputJSON(allDetails)
 		} else {
-			return HandleErrorRespectJSON("no issues found matching the provided IDs")
+			return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
+				"some IDs may reference deleted/purged records with no trace left in the live database — try 'bd history <id>' to check")
 		}
 	} else if foundCount == 0 {
 		return SilentExit()
@@ -484,16 +486,6 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 		fmt.Printf("%s\n", formatIssueHeader(issue))
 	}
 	fmt.Println(formatIssueMetadata(issue))
-
-	if issue.CompactionLevel > 0 && issue.OriginalSize > 0 {
-		currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-		saved := issue.OriginalSize - currentSize
-		if saved > 0 {
-			reduction := float64(saved) / float64(issue.OriginalSize) * 100
-			fmt.Println()
-			fmt.Printf("📊 %d → %d bytes (%.0f%% reduction)\n", issue.OriginalSize, currentSize, reduction)
-		}
-	}
 
 	if issue.Description != "" {
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))

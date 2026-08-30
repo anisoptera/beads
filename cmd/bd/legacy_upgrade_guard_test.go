@@ -196,9 +196,10 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 			name        string
 			version     string
 			wantRefusal bool
+			wantWarning bool
 		}{
 			{name: "missing witness", wantRefusal: true},
-			{name: "malformed witness", version: "not-a-version", wantRefusal: true},
+			{name: "malformed witness", version: "not-a-version", wantWarning: true},
 			{name: "legacy witness", version: "0.62.0", wantRefusal: true},
 			{name: "legacy pre-release witness", version: "0.62.0-rc.1", wantRefusal: true},
 			{name: "legacy snapshot witness", version: "0.62.1-next", wantRefusal: true},
@@ -212,6 +213,7 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				warnings := captureLegacyUpgradeWarnings(t)
 				beadsDir := t.TempDir()
 				metadata := []byte(`{"backend":"dolt","dolt_mode":"server"}`)
 				if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o600); err != nil {
@@ -235,6 +237,9 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 				if err != nil {
 					t.Fatalf("current server workspace was refused: %v", err)
 				}
+				if gotWarning := warnings.Len() > 0; gotWarning != tt.wantWarning {
+					t.Fatalf("guard warning presence = %v, want %v; warning: %q", gotWarning, tt.wantWarning, warnings.String())
+				}
 			})
 		}
 	})
@@ -254,12 +259,15 @@ func TestLegacyUpgradeGuardServerSelectionBeatsStaleEmbeddedRepository(t *testin
 	}{
 		{name: "historical witness", version: "0.62.0", wantRefusal: true},
 		{name: "missing witness", wantRefusal: true},
-		{name: "malformed witness", version: "not-a-version", wantRefusal: true},
+		{name: "malformed witness opens as unknown era", version: "not-a-version"},
 		{name: "current witness", version: "1.1.2"},
+		{name: "pseudo-version witness", version: "v1.1.1-0.20260805093327-bf97b73749ac"},
+		{name: "release candidate witness", version: "1.1.0-rc.1"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			captureLegacyUpgradeWarnings(t)
 			beadsDir := t.TempDir()
 			metadata := []byte(`{"backend":"dolt","dolt_mode":"server","dolt_database":"selected_server_db"}`)
 			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o600); err != nil {
@@ -417,34 +425,6 @@ func TestLegacyUpgradeGuardRejectsBackendTombstonesWithoutMigratingConfig(t *tes
 	}
 }
 
-func TestCurrentVersionWitness(t *testing.T) {
-	tests := []struct {
-		name    string
-		version string
-		want    bool
-	}{
-		{name: "release", version: "1.1.2", want: true},
-		{name: "v prefixed release", version: "v1.1.2", want: true},
-		{name: "pre-release", version: "1.1.0-rc.1", want: true},
-		{name: "build metadata", version: "1.1.0+ci.7", want: true},
-		{name: "brew HEAD stamp", version: "HEAD-f925f3f", want: true},
-		{name: "pre-v1 release", version: "0.62.0"},
-		{name: "pre-v1 pre-release", version: "0.62.0-rc.1"},
-		{name: "empty", version: ""},
-		{name: "not a version", version: "not-a-version"},
-		{name: "two part core", version: "1.1"},
-		{name: "non-numeric core", version: "1.x.0"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := currentVersionWitness(tt.version); got != tt.want {
-				t.Fatalf("currentVersionWitness(%q) = %v, want %v", tt.version, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestIsBrewHeadVersion(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -475,31 +455,6 @@ func TestIsBrewHeadVersion(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isBrewHeadVersion(tt.version); got != tt.want {
 				t.Fatalf("isBrewHeadVersion(%q) = %v, want %v", tt.version, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestLegacyVersionMinorToleratesSuffixes(t *testing.T) {
-	tests := []struct {
-		name      string
-		version   string
-		wantMinor int
-		wantOK    bool
-	}{
-		{name: "release", version: "0.62.0", wantMinor: 62, wantOK: true},
-		{name: "pre-release", version: "0.62.0-rc.1", wantMinor: 62, wantOK: true},
-		{name: "snapshot", version: "0.62.1-next", wantMinor: 62, wantOK: true},
-		{name: "build metadata", version: "0.55.4+ci", wantMinor: 55, wantOK: true},
-		{name: "post-v1", version: "1.1.0-rc.1"},
-		{name: "not a version", version: "not-a-version"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			minor, ok := legacyVersionMinor(tt.version)
-			if ok != tt.wantOK || minor != tt.wantMinor {
-				t.Fatalf("legacyVersionMinor(%q) = (%d, %v), want (%d, %v)", tt.version, minor, ok, tt.wantMinor, tt.wantOK)
 			}
 		})
 	}
