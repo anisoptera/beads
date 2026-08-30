@@ -256,11 +256,20 @@ server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 |---|---|
 | Current embedded metadata with `.beads/embeddeddolt/` and no explicit server selection | Direct current-era upgrade |
 | Explicit server metadata plus `.local_version` from v0.55.4 through v0.62.0, whether or not `.beads/dolt/` exists | Explicit legacy Dolt export/import |
-| Explicit server metadata plus `.beads/dolt/` and a current-era witness: an `x.y.z` whose major version is 1 or newer, or a Homebrew `--HEAD` stamp | Normal current server-mode upgrade |
-| Explicit server metadata plus `.beads/dolt/` and a missing, malformed, or pre-v1 witness | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/` and a current-era witness: a semantic version whose major version is 1 or newer, or a Homebrew `--HEAD` stamp | Normal current server-mode upgrade |
+| Explicit server metadata plus `.beads/dolt/` and a missing or pre-v1 witness | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/` and a witness that is present but unreadable | Normal current server-mode upgrade, with a warning |
 | Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
 | `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
 | One `.beads/*.db` file, such as `beads.db` or `vc.db` | Sealed SQLite bridge |
+
+The witness is whatever `bd` held in its own version string when it last touched
+the workspace, so it may be a plain release, a release candidate, a build
+carrying metadata, or a Go pseudo-version; all of those are read as the version
+they name. A witness that is present but unreadable is not treated as a legacy
+marker — no pre-v1 `bd` could have written one — so `bd` warns and continues
+rather than refusing every command. A *missing* witness stays ambiguous and is
+still refused.
 
 Current `bd` refuses recognized historical SQLite and legacy Dolt layouts before
 opening storage or rewriting metadata. This is intentional: preserve the source
@@ -313,12 +322,12 @@ sealed-copy helper below does not start or manage a Dolt SQL server.
 
 Explicit server metadata with a v0.55.4–v0.62.0 witness is always refused,
 including when there is no local `.beads/dolt/` root. When that root does exist,
-the guard admits explicit server mode only with a current-era witness: an
-`x.y.z` whose major version is 1 or newer, with any pre-release or build
-suffix such as `1.1.0-rc.1` tolerated, or the `HEAD-<shortsha>` stamp a
-Homebrew `--HEAD` install records. A missing or otherwise malformed witness
-fails closed. Without the local root, a missing, malformed, or non-historical witness
-is admitted only as a compatibility layout.
+the guard admits explicit server mode directly with a current-era witness: a
+semantic version whose major version is 1 or newer, including pre-release or
+build suffixes such as `1.1.0-rc.1`, or the `HEAD-<shortsha>` stamp a Homebrew
+`--HEAD` install records. A present but unreadable witness warns and opens; a
+missing or pre-v1 witness fails closed. Without the local root, a missing,
+malformed, or non-historical witness is admitted only as a compatibility layout.
 
 The configured shared-server compatibility path applies only when persisted
 metadata is missing or leaves `dolt_mode` blank/`embedded`; it does not override
