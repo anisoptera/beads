@@ -212,10 +212,14 @@ func AuthorizeAssigneeTransfer(ctx context.Context, tx DBTX, before *types.Issue
 //
 // Enforcement boundary: this fences the issueops-contract surfaces
 // (ExecuteUpdate, the uow update and batch legs). The map-based
-// UpdateIssueInTx funnel does not consult it — its one notes-replacing caller
-// is `bd edit`, which pre-fills the editor with the current notes, so the
-// overwrite there is a sighted edit rather than the blind clobber this fence
-// exists to stop. `bd import` is exempt BY DESIGN (GH#6190), along with every
+// UpdateIssueInTx funnel does not consult it, and it has several
+// notes-replacing callers, not one. They fall into classes that are all
+// sighted or derived rather than blind: editor pre-fill that starts from the
+// current notes (`bd edit`), read-combine-write that appends to them
+// (`bd note`, `bd defer --reason`), mechanical ID rewrites of existing text
+// (`bd rename`, delete-tombstoning), and explicit clears (`bd compact`). Each
+// derives its new value from the current notes, so none is the blind clobber
+// this fence exists to stop. `bd import` is exempt BY DESIGN (GH#6190), along with every
 // other live-state fence: its contract is row replacement, guarded by its own
 // staleness check (only strictly-newer rows rewrite local state; deliberate
 // overwrites of newer state require --allow-stale) and reported field-by-field

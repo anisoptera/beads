@@ -77,8 +77,11 @@ See: bd note --help`)
 To append a note:
   bd note <issue-id> "text"
 
-To change or clear notes (requires --force once notes are set):
+To replace notes (requires --force once notes are set):
   bd update <issue-id> --notes "text" --force
+
+To clear notes:
+  bd update <issue-id> --clear-notes
 
 See: bd note --help`, args[0], args[0])
 	case "update":
